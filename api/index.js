@@ -1,8 +1,9 @@
 export const config = { runtime: "edge" };
 
-const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-
-const STRIP_HEADERS = new Set([
+const ORIGIN_BASE_URL = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+const REQUEST_TIMEOUT_MS = 30_000;
+const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+const HOP_BY_HOP_HEADERS = new Set([
   "host",
   "connection",
   "keep-alive",
@@ -18,45 +19,72 @@ const STRIP_HEADERS = new Set([
   "x-forwarded-port",
 ]);
 
+function buildUpstreamUrl(requestUrl) {
+  const pathStartIndex = requestUrl.indexOf("/", 8);
+  return pathStartIndex === -1
+    ? `${ORIGIN_BASE_URL}/`
+    : `${ORIGIN_BASE_URL}${requestUrl.slice(pathStartIndex)}`;
+}
+
+function buildUpstreamHeaders(incomingHeaders) {
+  const upstreamHeaders = new Headers();
+  let forwardedClientIp = null;
+
+  for (const [headerName, headerValue] of incomingHeaders) {
+    if (HOP_BY_HOP_HEADERS.has(headerName)) continue;
+    if (headerName.startsWith("x-vercel-")) continue;
+    if (headerName === "x-real-ip") {
+      forwardedClientIp = headerValue;
+      continue;
+    }
+    if (headerName === "x-forwarded-for") {
+      if (!forwardedClientIp) forwardedClientIp = headerValue;
+      continue;
+    }
+    upstreamHeaders.set(headerName, headerValue);
+  }
+
+  if (forwardedClientIp) upstreamHeaders.set("x-forwarded-for", forwardedClientIp);
+  return upstreamHeaders;
+}
+
 export default async function handler(req) {
-  if (!TARGET_BASE) {
+  if (!ORIGIN_BASE_URL) {
     return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
   }
 
+  if (!ALLOWED_METHODS.has(req.method)) {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), REQUEST_TIMEOUT_MS);
+
   try {
-    const pathStart = req.url.indexOf("/", 8);
-    const targetUrl =
-      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
+    const upstreamUrl = buildUpstreamUrl(req.url);
+    const upstreamHeaders = buildUpstreamHeaders(req.headers);
+    const requestHasBody = req.method !== "GET" && req.method !== "HEAD";
 
-    const out = new Headers();
-    let clientIp = null;
-    for (const [k, v] of req.headers) {
-      if (STRIP_HEADERS.has(k)) continue;
-      if (k.startsWith("x-vercel-")) continue;
-      if (k === "x-real-ip") {
-        clientIp = v;
-        continue;
-      }
-      if (k === "x-forwarded-for") {
-        if (!clientIp) clientIp = v;
-        continue;
-      }
-      out.set(k, v);
-    }
-    if (clientIp) out.set("x-forwarded-for", clientIp);
-
-    const method = req.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
-
-    return await fetch(targetUrl, {
-      method,
-      headers: out,
-      body: hasBody ? req.body : undefined,
-      duplex: "half",
+    const upstreamRequest = {
+      method: req.method,
+      headers: upstreamHeaders,
       redirect: "manual",
-    });
+      signal: abortController.signal,
+    };
+
+    if (requestHasBody) {
+      upstreamRequest.body = req.body;
+      upstreamRequest.duplex = "half";
+    }
+
+    return await fetch(upstreamUrl, upstreamRequest);
   } catch (err) {
-    console.error("relay error:", err);
-    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
+    const isTimeoutError = err?.name === "AbortError";
+    console.error("edge relay request failed:", err);
+    return new Response(isTimeoutError ? "Gateway Timeout" : "Bad Gateway", {
+      status: isTimeoutError ? 504 : 502,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 }

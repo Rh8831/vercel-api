@@ -1,16 +1,15 @@
-# vercel-xhttp-relay
+# vercel-edge-stream-relay
 
-A minimal **Vercel Edge Function** that relays **XHTTP** traffic to your
-backend Xray/V2Ray server. Use Vercel's globally distributed edge network
-(and its `vercel.com` / `*.vercel.app` SNI) as a front for your real Xray
-endpoint — useful in regions where the backend host is blocked but Vercel
-is reachable.
+A minimal **Vercel Edge Function** that relays **streaming HTTP** traffic to
+your own backend service. It focuses on efficient request/response streaming
+while preserving method, path, query string, and most headers.
 
-> ⚠️ **XHTTP transport only.** This relay is purpose-built for Xray's
-> `xhttp` transport. It will **not** work with `WebSocket`, `gRPC`, `TCP`,
-> `mKCP`, `QUIC`, or any other V2Ray/Xray transport — the Edge runtime
-> doesn't support WebSocket upgrade or arbitrary TCP, and the other
-> transports rely on protocol features Edge `fetch` doesn't expose.
+If you're using **xray-core with `xhttp`**, this relay stays compatible with
+that model because it forwards streaming request/response bodies end-to-end.
+
+> ⚠️ **HTTP(S) transport only.** This project is an HTTP relay built on Edge
+> `fetch` streaming APIs. It does **not** support raw TCP/UDP tunneling or
+> WebSocket upgrade handling.
 
 ## Disclaimer
 
@@ -43,25 +42,25 @@ solution with monitoring, hardening, legal review, and operational ownership.
 
 ```
 ┌──────────┐   TLS / SNI: *.vercel.app    ┌──────────────────┐    HTTP/2     ┌──────────────┐
-│  Client  │ ───────────────────────────► │  Vercel Edge     │ ───────────►  │  Your Xray   │
-│ (v2rayN, │   XHTTP request (POST/GET)   │  (V8 isolate,    │  XHTTP frames │  server with │
-│ xray-core│                              │  streams body)   │  forwarded    │ XHTTP inbound│
+│  Client  │ ───────────────────────────► │  Vercel Edge     │ ───────────►  │  Your backend│
+│ (browser/│   streaming HTTP request     │  (V8 isolate,    │  streams       │  HTTP origin │
+│ SDK/API) │   (POST/GET/PUT/...)         │  streams body)   │  forwarded     │              │
 └──────────┘                              └──────────────────┘               └──────────────┘
 ```
 
-1. Your Xray client opens an XHTTP request to a Vercel domain
+1. A client opens a streaming HTTP request to a Vercel domain
    (`your-app.vercel.app`, or any custom domain pointed at Vercel).
 2. The TLS handshake uses **Vercel's certificate / SNI**, so to a censor it
    looks like ordinary traffic to a legitimate Vercel-hosted site.
-3. The Edge function pipes the request body to your real Xray server
+3. The Edge function pipes the request body to your backend origin
    (`TARGET_DOMAIN`) as a `ReadableStream` — no buffering — and pipes the
    upstream response back the same way.
 
-## Why Edge Runtime?
+## Why Edge Runtime for HTTP Relays?
 
 - **True bidirectional streaming** via WebStreams (`req.body` →
   `fetch(..., { duplex: "half" })` → upstream response). First byte out as
-  soon as first byte in. This matches XHTTP's chunked POST/GET model
+  soon as first byte in. This matches streaming HTTP's chunked POST/GET model
   exactly.
 - **~5–50 ms cold starts.** Edge functions run in V8 isolates, not AWS
   Lambda microVMs — roughly 10× faster to start than the equivalent
@@ -87,7 +86,9 @@ The handler is written for sustained throughput:
 - `fetch(targetUrl, options)` is called directly — no extra
   `new Request(...)` allocation.
 - `redirect: "manual"` keeps Vercel from chasing 3xx upstream and
-  breaking the XHTTP framing.
+  breaking the streaming HTTP framing.
+- `duplex: "half"` is sent only when a request body exists, avoiding extra
+  request options for bodyless methods.
 
 ---
 
@@ -95,8 +96,7 @@ The handler is written for sustained throughput:
 
 ### 1. Requirements
 
-- A working **Xray server with XHTTP inbound** already running on a public
-  host (this is your `TARGET_DOMAIN`).
+- A working public HTTP backend (this is your `TARGET_DOMAIN`).
 - [Vercel CLI](https://vercel.com/docs/cli): `npm i -g vercel`
 - A Vercel account (Pro recommended for higher bandwidth and concurrent
   invocation limits).
@@ -108,7 +108,7 @@ Variables**, add:
 
 | Name            | Example                         | Description                                          |
 | --------------- | ------------------------------- | ---------------------------------------------------- |
-| `TARGET_DOMAIN` | `https://xray.example.com:2096` | Full origin URL of your backend Xray XHTTP endpoint. |
+| `TARGET_DOMAIN` | `https://api.example.com` | Full base URL of your upstream HTTP origin. |
 
 Notes:
 
@@ -119,8 +119,8 @@ Notes:
 ### 3. Deploy
 
 ```bash
-git clone https://github.com/ramynn/vercel-xhttp-relay.git
-cd vercel-xhttp-relay
+git clone https://github.com/ramynn/vercel-edge-stream-relay.git
+cd vercel-edge-stream-relay
 
 vercel --prod
 ```
@@ -129,63 +129,28 @@ After deployment Vercel gives you a URL like `your-app.vercel.app`.
 
 ---
 
-## Client Configuration (VLESS / Xray with XHTTP)
+## Client Configuration
 
-In your client config, point the **address** at your Vercel domain and set
-**SNI / Host** to a `vercel.com`-family hostname. The `id`, `path`, and
-inbound settings must match what your real Xray server expects — the relay
-is transport-agnostic and just forwards bytes.
+Point your HTTP client, SDK, or frontend app to your Vercel deployment URL.
+The relay preserves path/query and forwards the stream to `TARGET_DOMAIN`.
 
-### Example VLESS share link
+### Example request
 
 ```
-vless://UUID@vercel.com:443?encryption=none&security=tls&sni=vercel.com&type=xhttp&path=/yourpath&host=your-app.vercel.app#vercel-relay
-```
-
-### Example Xray client JSON (outbound)
-
-```json
-{
-  "protocol": "vless",
-  "settings": {
-    "vnext": [
-      {
-        "address": "vercel.com",
-        "port": 443,
-        "users": [{ "id": "YOUR-UUID", "encryption": "none" }]
-      }
-    ]
-  },
-  "streamSettings": {
-    "network": "xhttp",
-    "security": "tls",
-    "tlsSettings": {
-      "serverName": "vercel.com",
-      "allowInsecure": false
-    },
-    "xhttpSettings": {
-      "path": "/yourpath",
-      "host": "your-app.vercel.app",
-      "mode": "auto"
-    }
-  }
-}
+curl -X POST https://your-app.vercel.app/api/events --data-binary @payload.bin
 ```
 
 ### Tips
 
 - You can use **any Vercel-fronted hostname** for SNI as long as the TLS
   handshake reaches Vercel. Custom domains pointed at Vercel work too.
-- The `path` and `id` (UUID) must match the **backend Xray** XHTTP inbound,
-  not this relay.
-- If censorship targets `*.vercel.app` directly, attach a custom domain in
-  the Vercel dashboard and use that as both `address` and `sni`.
+- Use a custom domain in Vercel for clearer branding and production setups.
 
 ---
 
 ## Limitations
 
-- **XHTTP only.** WebSocket / gRPC / raw TCP / mKCP / QUIC do **not** work
+- **streaming HTTP only.** WebSocket / gRPC / raw TCP / mKCP / QUIC do **not** work
   on Vercel's Edge runtime regardless of how the relay is implemented.
 - **Edge per-invocation CPU budget** (~50 ms compute on Hobby, more on
   Pro). I/O wait time doesn't count, so streaming proxies stay well within
