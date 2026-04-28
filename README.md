@@ -1,15 +1,14 @@
 # vercel-edge-stream-relay
 
-A minimal **Vercel Edge Function** that relays **streaming HTTP** traffic to
-your own backend service. It focuses on efficient request/response streaming
-while preserving method, path, query string, and most headers.
+A production-oriented **Vercel Edge Function** that relays **streaming HTTP** traffic to
+your backend service with stronger defaults for observability, header hygiene,
+and predictable behavior under timeout/error conditions.
 
-If you're using **xray-core with `xhttp`**, this relay stays compatible with
-that model because it forwards streaming request/response bodies end-to-end.
+This relay is transport-agnostic at the HTTP layer and works well for
+standard API forwarding, event ingestion, and low-latency streaming workloads.
 
-> ⚠️ **HTTP(S) transport only.** This project is an HTTP relay built on Edge
-> `fetch` streaming APIs. It does **not** support raw TCP/UDP tunneling or
-> WebSocket upgrade handling.
+> ⚠️ **HTTP(S) transport only.** It does **not** support raw TCP/UDP
+> tunneling or WebSocket upgrade handling.
 
 ## Disclaimer
 
@@ -173,3 +172,18 @@ curl -X POST https://your-app.vercel.app/api/events --data-binary @payload.bin
 ## License
 
 MIT.
+
+
+## Runtime Controls
+
+Set these optional environment variables in Vercel:
+
+| Name | Default | Purpose |
+| --- | --- | --- |
+| `TARGET_DOMAIN` | _(required)_ | Upstream origin (`http://` or `https://`). |
+| `UPSTREAM_TIMEOUT_MS` | `30000` | Upstream request timeout in milliseconds. |
+| `ALLOWED_METHODS` | `GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS` | Comma-separated allowlist of HTTP methods. |
+| `TRUST_CLIENT_IP` | `false` | If `true`, forwards incoming IP to `x-forwarded-for`. |
+| `STRIP_TRACKING_HEADERS` | `true` | Drops hosting/network telemetry headers before upstream forwarding. |
+
+Responses include `x-relay-request-id` for request tracing.
