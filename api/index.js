@@ -136,7 +136,7 @@ export default async function handler(req) {
     const upstreamResponse = await fetch(buildUpstreamUrl(req.url), upstreamRequest);
     const responseHeaders = new Headers(upstreamResponse.headers);
     responseHeaders.set("x-relay-request-id", requestId);
-    responseHeaders.set("x-relay", "vercel-edge");
+    responseHeaders.set("x-relay", process.env.NETLIFY ? "netlify-edge" : "vercel-edge");
 
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,

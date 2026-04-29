@@ -115,6 +115,23 @@ Notes:
 - Include a non-default port if needed.
 - Trailing slashes are stripped automatically.
 
+
+### Netlify support
+
+Yes — with this repo it now also runs on **Netlify Edge Functions**.
+
+1. Set the same environment variables in Netlify (`TARGET_DOMAIN`, optional runtime controls).
+2. Deploy this repo to Netlify.
+3. `netlify.toml` routes all paths to `netlify/edge-functions/relay.js`, which reuses the same relay logic in `api/index.js`.
+
+Quick check after deploy:
+
+```bash
+curl -i https://<your-netlify-site>/health
+```
+
+You should see an `x-relay` response header (`netlify-edge` on Netlify, `vercel-edge` on Vercel).
+
 ### 3. Deploy
 
 ```bash
